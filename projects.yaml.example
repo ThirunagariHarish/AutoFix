@@ -1,0 +1,148 @@
+# ============================================================
+# AutoFix Configuration File — Fully Annotated Example
+# Save as: projects.yaml (in the directory where you run autofix.py)
+# ============================================================
+
+# REQUIRED. Schema version for forward compatibility.
+# Current supported version: "1.0"
+schema_version: "1.0"
+
+# ============================================================
+# GLOBAL SETTINGS
+# All fields are optional; defaults shown below.
+# ============================================================
+global:
+  # Name of the tmux session AutoFix creates/reuses.
+  # Default: "autofix"
+  tmux_session_name: "autofix"
+
+  # How often (seconds) the watchdog checks each pane's liveness.
+  # Default: 60
+  watchdog_interval_seconds: 60
+
+  # The command sent to each tmux pane to start the Claude agent.
+  # Default: "claude --dangerously-skip-permissions"
+  claude_command: "claude --dangerously-skip-permissions"
+
+  # Git author identity for all commits made by the AutoFix agent.
+  git_author_name: "AutoFix Agent"
+  git_author_email: "autofix@local"
+
+  # Directory for orchestrator logs. Relative to autofix.py location.
+  # Default: "./logs"
+  log_dir: "./logs"
+
+# ============================================================
+# PROJECTS — Maximum 10 in v1
+# ============================================================
+projects:
+
+  # ─────────────────────────────────────────
+  # Example Project 1: Python API
+  # ─────────────────────────────────────────
+  - name: "my-python-api"
+    # Git remote URL (SSH recommended to avoid credential prompts)
+    repo_url: "git@github.com:yourorg/my-python-api.git"
+    # Absolute path on this machine where the repo lives (or will be cloned)
+    local_path: "/home/user/projects/my-python-api"
+    # Git branch to monitor and push fixes to
+    branch: "main"
+    # Language: python | nodejs | ruby | go | auto
+    # "auto" detects from manifest files (go.mod, package.json, etc.)
+    language: "python"
+    # Path to the application log file, relative to local_path
+    log_path: "logs/app.log"
+
+    # VPS settings — the server where this project is deployed
+    vps:
+      enabled: true
+      host: "192.168.1.100"
+      user: "deploy"
+      # SSH private key for both git operations and VPS access
+      # Replace with your actual key path, e.g. ~/.ssh/id_rsa
+      ssh_key_path: "/dev/null"
+      # Name of the Docker container running this project on the VPS.
+      # The Claude agent uses this to stream live logs via SSH:
+      #   ssh {vps_user}@{host} "docker logs -f {docker_container_name}"
+      # Also used as the default value for log_stream_command when not set explicitly.
+      docker_container_name: "my-python-api-app"
+      # Absolute path on the VPS to the directory containing docker-compose.yml.
+      # The Claude agent runs docker-compose commands here when redeploying after a fix:
+      #   ssh {vps_user}@{host} "cd {docker_compose_path} && docker-compose up -d"
+      docker_compose_path: "/opt/my-python-api"
+      # Command the Claude agent executes via SSH on the VPS to stream live Docker logs.
+      # Defaults to: "docker logs -f {docker_container_name}" if not set.
+      # Override with any command that streams log lines to stdout on the VPS, e.g.:
+      #   "docker-compose -f /opt/app/docker-compose.yml logs -f app"
+      #   "journalctl -u my-service -f -o json"
+      log_stream_command: "docker logs -f my-python-api-app"
+      # Command to verify the service is healthy after a fix is deployed
+      verify_command: "docker ps --filter name=my-python-api-app --format '{{.Status}}'"
+      # Expected substring in verify_command output to confirm healthy state
+      verify_output_contains: "Up"
+
+    # Optional: override git push/pull behaviour per project
+    git:
+      # Branch to push fixes to (defaults to branch above)
+      push_branch: "main"
+      pull_before_fix: true
+      commit_sign: false
+
+    # Monitoring thresholds and safeguards
+    monitoring:
+      # Minimum minutes between triggering fixes for the same error
+      error_debounce_minutes: 5
+      # Maximum automated fixes per hour (hard limit: 1–20)
+      max_fixes_per_hour: 3
+      # Error message substrings that must NEVER be auto-fixed
+      # (require human review)
+      blocked_patterns:
+        - "CVE-"
+        - "SQL injection"
+        - "database migration"
+
+    # Optional webhook notifications
+    notifications:
+      webhook_url: "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+      # Events that trigger a notification
+      # Valid values: fix_applied, fix_failed, verification_failed
+      on_events:
+        - "fix_applied"
+        - "fix_failed"
+        - "verification_failed"
+
+  # ─────────────────────────────────────────
+  # Example Project 2: Node.js Service
+  # ─────────────────────────────────────────
+  - name: "my-node-service"
+    repo_url: "git@github.com:yourorg/my-node-service.git"
+    local_path: "/home/user/projects/my-node-service"
+    branch: "develop"
+    language: "nodejs"
+    log_path: "logs/service.log"
+
+    vps:
+      enabled: true
+      host: "10.0.0.50"
+      user: "ubuntu"
+      ssh_key_path: "/dev/null"
+      docker_container_name: "node-service"
+      # Absolute path on the VPS to the directory containing docker-compose.yml.
+      docker_compose_path: "/srv/node-service"
+      # Command the Claude agent runs via SSH to stream live Docker logs.
+      log_stream_command: "docker logs -f node-service"
+      verify_command: "docker ps --filter name=node-service --format '{{.Status}}'"
+      verify_output_contains: "Up"
+
+    monitoring:
+      error_debounce_minutes: 10
+      max_fixes_per_hour: 2
+      blocked_patterns:
+        - "CVE-"
+        - "DROP TABLE"
+        - "credentials"
+
+    notifications:
+      webhook_url: ""
+      on_events:
+        - "fix_failed"

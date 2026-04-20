@@ -1,0 +1,36 @@
+schema_version: "1.0"
+
+global:
+  tmux_session_name: "autofix-test"
+  watchdog_interval_seconds: 30
+  git_author_name: "Test Agent"
+  git_author_email: "test@autofix.local"
+
+projects:
+  - name: "test-python-project"
+    repo_url: "git@github.com:example/test-python.git"
+    local_path: "/tmp/autofix-test/test-python-project"
+    branch: "main"
+    language: "python"
+    log_path: "logs/app.log"
+    vps:
+      host: "192.168.1.10"
+      user: "deploy"
+      ssh_key_path: "/tmp/autofix-test-key"
+      verify_command: "docker ps"
+      verify_output_contains: "Up"
+      enabled: true
+
+  - name: "test-node-project"
+    repo_url: "git@github.com:example/test-node.git"
+    local_path: "/tmp/autofix-test/test-node-project"
+    branch: "develop"
+    language: "nodejs"
+    log_path: "logs/service.log"
+    vps:
+      host: "192.168.1.11"
+      user: "ubuntu"
+      ssh_key_path: "/tmp/autofix-test-key"
+      verify_command: "docker ps"
+      verify_output_contains: "Up"
+      enabled: false

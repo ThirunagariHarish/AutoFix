@@ -1,0 +1,20 @@
+schema_version: "1.0"
+
+projects:
+  - name: "duplicate-project"
+    repo_url: "git@github.com:example/proj1.git"
+    local_path: "/tmp/autofix-test/proj1"
+    vps:
+      host: "192.168.1.10"
+      user: "deploy"
+      ssh_key_path: "/tmp/autofix-test-key"
+      verify_command: "docker ps"
+
+  - name: "duplicate-project"
+    repo_url: "git@github.com:example/proj2.git"
+    local_path: "/tmp/autofix-test/proj2"
+    vps:
+      host: "192.168.1.11"
+      user: "deploy"
+      ssh_key_path: "/tmp/autofix-test-key"
+      verify_command: "docker ps"

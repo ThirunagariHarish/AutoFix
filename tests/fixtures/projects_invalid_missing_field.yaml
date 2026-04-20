@@ -1,0 +1,7 @@
+schema_version: "1.0"
+
+projects:
+  - name: "broken-project"
+    repo_url: "git@github.com:example/broken.git"
+    local_path: "/tmp/autofix-test/broken"
+    # vps block missing entirely — this is the required missing field

@@ -1,0 +1,12 @@
+schema_version: "1.0"
+
+projects:
+  - name: "rust-project"
+    repo_url: "git@github.com:example/rust-proj.git"
+    local_path: "/tmp/autofix-test/rust-proj"
+    language: "rust"
+    vps:
+      host: "192.168.1.10"
+      user: "deploy"
+      ssh_key_path: "/tmp/autofix-test-key"
+      verify_command: "docker ps"

@@ -1,0 +1,16 @@
+projects.yaml
+autofix.log
+logs/
+.autofix_init
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.DS_Store
