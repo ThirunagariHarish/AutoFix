@@ -13,16 +13,17 @@ A built-in **watchdog thread** monitors every tmux pane from the orchestrator si
 1. [What is AutoFix?](#1-what-is-autofix)
 2. [How it works](#2-how-it-works)
 3. [Requirements](#3-requirements)
-4. [Installation](#4-installation)
-5. [Configuration](#5-configuration)
-6. [Running](#6-running)
-7. [First-time project setup](#7-first-time-project-setup)
-8. [Logging templates](#8-logging-templates)
-9. [Watchdog](#9-watchdog)
-10. [Safety guardrails](#10-safety-guardrails)
-11. [Audit Trail](#11-audit-trail)
-12. [Project structure](#12-project-structure)
-13. [Troubleshooting](#13-troubleshooting)
+4. [Deploy AutoFix on a Dedicated VPS](#4-deploy-autofix-on-a-dedicated-vps)
+5. [Local Installation](#5-local-installation)
+6. [Configuration](#6-configuration)
+7. [Running](#7-running)
+8. [First-time project setup](#8-first-time-project-setup)
+9. [Logging templates](#9-logging-templates)
+10. [Watchdog](#10-watchdog)
+11. [Safety guardrails](#11-safety-guardrails)
+12. [Audit Trail](#12-audit-trail)
+13. [Project structure](#13-project-structure)
+14. [Troubleshooting](#14-troubleshooting)
 
 ---
 
@@ -73,11 +74,339 @@ libtmux>=0.28
 
 ---
 
-## 4. Installation
+## 4. Deploy AutoFix on a Dedicated VPS
+
+This section is for the most common production scenario: you have **one or more VPS machines running your Docker projects**, and you want to spin up a **separate "monitoring VPS"** that runs AutoFix 24/7, SSHes into each project VPS, and monitors everything from a single place.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│              Your laptop / any machine                  │
+│  ssh ubuntu@<monitoring-vps>                            │
+│  tmux attach -t autofix                                 │
+└────────────────────┬────────────────────────────────────┘
+                     │  SSH
+                     ▼
+┌─────────────────────────────────────────────────────────┐
+│          Monitoring VPS  (AutoFix lives here)           │
+│                                                         │
+│  tmux session "autofix"                                 │
+│  ├─ window: project-api     → claude agent              │
+│  ├─ window: project-worker  → claude agent              │
+│  └─ window: project-site    → claude agent              │
+│                                                         │
+│  Each agent SSHes out to the project VPS(es) ──────────►│
+└─────────────────────────────────────────────────────────┘
+                     │  SSH (docker logs -f)
+         ┌───────────┴───────────┐
+         ▼                       ▼
+┌──────────────────┐   ┌──────────────────┐
+│  Project VPS 1   │   │  Project VPS 2   │
+│  Docker containers│   │  Docker containers│
+└──────────────────┘   └──────────────────┘
+```
+
+### Step 1 — Provision the monitoring VPS
+
+Any small VPS works (1 vCPU, 1 GB RAM is enough for 5 projects). Recommended OS: **Ubuntu 22.04 LTS**.
+
+```bash
+# SSH into your new monitoring VPS
+ssh ubuntu@<monitoring-vps-ip>
+```
+
+### Step 2 — Install system dependencies
+
+```bash
+sudo apt update && sudo apt upgrade -y
+
+# tmux (required — must be >= 3.0)
+sudo apt install -y tmux git curl wget unzip build-essential
+
+# Python 3.11 (Ubuntu 22.04 ships 3.10; upgrade for best compatibility)
+sudo apt install -y python3.11 python3.11-venv python3-pip
+python3.11 --version   # confirm
+
+# Make python3 / pip point to 3.11
+sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+```
+
+Verify tmux version:
+
+```bash
+tmux -V   # must show 3.0 or later
+```
+
+### Step 3 — Install Node.js and the Claude CLI
+
+The Claude Code CLI is distributed as an npm package. Install Node.js first:
+
+```bash
+# Install Node.js LTS via NodeSource
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+sudo apt install -y nodejs
+node --version   # v20.x or later
+
+# Install Claude Code CLI globally
+sudo npm install -g @anthropic-ai/claude-code
+claude --version   # confirm
+```
+
+### Step 4 — Authenticate Claude
+
+Claude CLI requires a one-time login. On the monitoring VPS run:
+
+```bash
+claude login
+```
+
+Follow the browser link printed in the terminal. If the VPS has no browser, copy the URL to your laptop, authenticate, and paste the resulting token back. Once authenticated the credential is stored in `~/.config/claude/` and persists across reboots.
+
+> **Tip:** You can also set `ANTHROPIC_API_KEY` as an environment variable in `/etc/environment` or `~/.bashrc` if you prefer API key auth over device login.
+
+### Step 5 — Set up SSH keys for your project VPSes
+
+AutoFix SSHes from the monitoring VPS to each project VPS. Use **key-based auth** — no passwords.
+
+```bash
+# Generate a dedicated key for AutoFix (on the monitoring VPS)
+ssh-keygen -t ed25519 -C "autofix-agent" -f ~/.ssh/autofix_id_ed25519 -N ""
+
+# Copy the public key to EACH project VPS
+# Replace <user> and <project-vps-ip> for each VPS
+ssh-copy-id -i ~/.ssh/autofix_id_ed25519.pub <user>@<project-vps-1-ip>
+ssh-copy-id -i ~/.ssh/autofix_id_ed25519.pub <user>@<project-vps-2-ip>
+# ... repeat for every project VPS
+
+# Test the connection
+ssh -i ~/.ssh/autofix_id_ed25519 <user>@<project-vps-1-ip> "docker ps"
+```
+
+You should see a container list with no password prompt. If it fails, check [SSH troubleshooting](#ssh-key-rejected--permission-denied-publickey).
+
+### Step 6 — Set up SSH keys for GitHub / GitLab
+
+AutoFix also needs to `git clone` and `git push` to your project repositories. Add a **deploy key** (or use the same `autofix_id_ed25519` key if you prefer a single key):
+
+```bash
+# Print the public key
+cat ~/.ssh/autofix_id_ed25519.pub
+```
+
+Then on GitHub: **Repository → Settings → Deploy Keys → Add deploy key**. Tick **"Allow write access"** so the agent can push fixes.
+
+For multiple repos you can add the same key to each repo, or use a GitHub personal access token (PAT) stored in `~/.netrc`:
+
+```bash
+# ~/.netrc  (chmod 600)
+machine github.com
+  login <your-github-username>
+  password <your-github-pat>
+```
+
+### Step 7 — Clone AutoFix onto the monitoring VPS
+
+```bash
+# Clone AutoFix
+git clone https://github.com/ThirunagariHarish/AutoFix.git ~/AutoFix
+cd ~/AutoFix
+
+# Create a Python virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Verify
+python autofix.py --version
+```
+
+### Step 8 — Configure your projects
+
+```bash
+cp projects.yaml.example projects.yaml
+nano projects.yaml   # or vim / your editor of choice
+```
+
+Fill in one entry per project. Here is a minimal real-world example for two projects on two different VPSes:
+
+```yaml
+schema_version: "1.0"
+
+global:
+  tmux_session_name: "autofix"
+  watchdog_interval_seconds: 60
+  claude_command: "claude --dangerously-skip-permissions"
+  git_author_name: "AutoFix Agent"
+  git_author_email: "autofix@yourdomain.com"
+  log_dir: "/home/ubuntu/AutoFix/logs"
+
+projects:
+  - name: "api-service"
+    repo_url: "git@github.com:yourorg/api-service.git"
+    local_path: "/home/ubuntu/autofix-workspace/api-service"
+    branch: "main"
+    language: "python"
+    log_path: "logs/app.log"
+    vps:
+      enabled: true
+      host: "203.0.113.10"                     # Project VPS 1 IP
+      user: "ubuntu"
+      ssh_key_path: "~/.ssh/autofix_id_ed25519"
+      docker_container_name: "api-service"
+      docker_compose_path: "/opt/api-service"
+      log_stream_command: "docker logs -f api-service"
+      verify_command: "docker ps --filter name=api-service --format '{{.Status}}'"
+      verify_output_contains: "Up"
+    monitoring:
+      error_debounce_minutes: 5
+      max_fixes_per_hour: 3
+      blocked_patterns:
+        - "CVE-"
+        - "database migration"
+        - "credentials"
+
+  - name: "worker-service"
+    repo_url: "git@github.com:yourorg/worker-service.git"
+    local_path: "/home/ubuntu/autofix-workspace/worker-service"
+    branch: "main"
+    language: "nodejs"
+    log_path: "logs/app.log"
+    vps:
+      enabled: true
+      host: "203.0.113.20"                     # Project VPS 2 IP
+      user: "deploy"
+      ssh_key_path: "~/.ssh/autofix_id_ed25519"
+      docker_container_name: "worker"
+      docker_compose_path: "/srv/worker"
+      log_stream_command: "docker logs -f worker"
+      verify_command: "docker ps --filter name=worker --format '{{.Status}}'"
+      verify_output_contains: "Up"
+    monitoring:
+      error_debounce_minutes: 10
+      max_fixes_per_hour: 2
+```
+
+> **`projects.yaml` is git-ignored** — it contains SSH key paths and VPS IPs. Never commit it.
+
+### Step 9 — Dry run (validate everything)
+
+```bash
+cd ~/AutoFix
+source .venv/bin/activate
+python autofix.py --dry-run
+```
+
+A successful dry run prints each project's resolved config, confirms all prerequisites pass, and exits without touching tmux or git. Fix any validation errors before proceeding.
+
+### Step 10 — Start AutoFix
+
+```bash
+# Start monitoring (opens tmux session and attaches)
+python autofix.py
+
+# Or start headless (no attach) — useful if launching via SSH from your laptop
+python autofix.py --no-attach
+```
+
+Once running you will see one tmux window per project. Each window shows the Claude agent working in real time.
+
+### Step 11 — Reconnect from your laptop anytime
+
+AutoFix runs entirely inside a persistent tmux session. You can disconnect and reconnect freely:
+
+```bash
+# From your laptop — SSH into the monitoring VPS
+ssh ubuntu@<monitoring-vps-ip>
+
+# Re-attach to the AutoFix session
+tmux attach -t autofix
+
+# Switch between project windows
+# Ctrl+B, then window number (0, 1, 2…) or project name
+tmux select-window -t autofix:api-service
+tmux select-window -t autofix:worker-service
+
+# Detach without stopping AutoFix
+# Ctrl+B, then D
+```
+
+### Step 12 — Keep AutoFix running after SSH disconnect / reboot (systemd)
+
+To ensure AutoFix survives SSH disconnections and VPS reboots, install it as a **systemd service**:
+
+```bash
+# Create the service file
+sudo tee /etc/systemd/system/autofix.service > /dev/null << 'EOF'
+[Unit]
+Description=AutoFix Autonomous Monitoring Agent
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/AutoFix
+Environment=PATH=/home/ubuntu/AutoFix/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=/bin/bash -c 'tmux has-session -t autofix 2>/dev/null && tmux kill-session -t autofix; true'
+ExecStart=/home/ubuntu/AutoFix/.venv/bin/python autofix.py --no-attach
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable autofix
+sudo systemctl start autofix
+
+# Check status
+sudo systemctl status autofix
+
+# Follow live orchestrator logs
+sudo journalctl -u autofix -f
+```
+
+> **Note:** The `--no-attach` flag is mandatory when running under systemd (no TTY to attach to). The tmux session is still created and accessible via `tmux attach -t autofix` from any SSH session.
+
+### Step 13 — View orchestrator logs
+
+```bash
+# JSON orchestrator log (all events)
+tail -f ~/AutoFix/logs/autofix.log | python3 -m json.tool
+
+# Or pretty-print with jq
+tail -f ~/AutoFix/logs/autofix.log | jq .
+
+# systemd journal (when running as a service)
+sudo journalctl -u autofix -n 100 --no-pager
+```
+
+### Quick-reference cheat sheet
+
+| Task | Command |
+|---|---|
+| Start monitoring | `python autofix.py` |
+| Start headless | `python autofix.py --no-attach` |
+| Dry run | `python autofix.py --dry-run` |
+| Attach to session | `tmux attach -t autofix` |
+| Switch to a project | `tmux select-window -t autofix:<name>` |
+| Detach (keep running) | `Ctrl+B D` |
+| Stop AutoFix | `Ctrl+C` in the session, or `sudo systemctl stop autofix` |
+| Restart after config change | `sudo systemctl restart autofix` |
+| Tail orchestrator log | `tail -f ~/AutoFix/logs/autofix.log \| jq .` |
+| Check service status | `sudo systemctl status autofix` |
+
+---
+
+## 5. Local Installation
 
 ```bash
 # 1. Clone AutoFix
-git clone https://github.com/yourorg/AutoFix.git
+git clone https://github.com/ThirunagariHarish/AutoFix.git
 cd AutoFix
 
 # 2. Install Python dependencies
@@ -99,7 +428,7 @@ python autofix.py --dry-run
 
 ---
 
-## 5. Configuration
+## 6. Configuration
 
 All configuration lives in `projects.yaml` (never committed — add it to `.gitignore`).
 
@@ -222,7 +551,7 @@ Webhook payload format:
 
 ---
 
-## 6. Running
+## 7. Running
 
 ```bash
 # Start monitoring all projects (attaches to tmux session)
@@ -256,7 +585,7 @@ tmux select-window -t autofix:<project-name>
 
 ---
 
-## 7. First-time project setup
+## 8. First-time project setup
 
 When AutoFix launches an agent for a project that has **no `log.md` file** and **no `.autofix_init` marker** in the repository root, the agent enters **initialisation mode**:
 
@@ -272,7 +601,7 @@ After initialisation the agent transitions directly into the monitoring loop.
 
 ---
 
-## 8. Logging templates
+## 9. Logging templates
 
 AutoFix ships ready-to-use logging setup snippets for six frameworks. The agent reads the appropriate snippet from `logging_templates/` and injects it into the project when initialisation is needed.
 
@@ -287,7 +616,7 @@ All templates produce **structured JSON output** so errors are machine-parseable
 
 ---
 
-## 9. Watchdog
+## 10. Watchdog
 
 The watchdog is a background daemon thread (`threading.Thread(daemon=True)`) that starts automatically after all agents are launched. It polls every `watchdog_interval_seconds` (default: 60 s).
 
@@ -303,10 +632,10 @@ The watchdog is a background daemon thread (`threading.Thread(daemon=True)`) tha
 
 **Crash-loop detection:**
 
-The watchdog tracks a rolling list of crash timestamps (last 10 minutes) per project. If a project crashes **three or more times within 10 minutes** the watchdog:
+The watchdog tracks a rolling list of crash timestamps (last 10 minutes) per project. If a project crashes **five or more times within 10 minutes** the watchdog:
 
 - Marks the project as `crash-looping`.
-- Logs `[watchdog] ERROR: '<name>' crash-looping (>= 3 crashes in 10 min). NOT respawning.`
+- Logs `[watchdog] ERROR: '<name>' crash-looping (>= 5 crashes in 10 min). NOT respawning.`
 - Stops attempting restarts for that project.
 
 This prevents infinite-restart loops when a project has a fundamental startup failure (bad environment variable, missing secret, broken dependency). To clear the crash-loop state, restart AutoFix (`Ctrl+C` then `python autofix.py`).
@@ -317,7 +646,7 @@ This prevents infinite-restart loops when a project has a fundamental startup fa
 
 ---
 
-## 10. Safety guardrails
+## 11. Safety guardrails
 
 AutoFix is designed to be **conservative by default**. Multiple layers prevent runaway or harmful automation:
 
@@ -330,12 +659,12 @@ AutoFix is designed to be **conservative by default**. Multiple layers prevent r
 | **No secrets** | Agents are instructed never to commit `.env`, `secrets.*`, private keys, or credentials |
 | **No migrations** | `database migration` is a default blocked pattern; schema changes require human sign-off |
 | **No CVEs** | `CVE-` is a default blocked pattern; security advisories require human review |
-| **Crash-loop stop** | Watchdog halts restarts after 3 crashes in 10 minutes |
+| **Crash-loop stop** | Watchdog halts restarts after 5 crashes in 10 minutes |
 | **Audit trail** | Every fix commits with `[autofix]` tag + appends entry to `log.md` |
 
 ---
 
-## 11. Audit Trail
+## 12. Audit Trail
 
 Every action AutoFix takes is traceable. All automated commits include `[autofix]` in the message:
 
@@ -363,7 +692,7 @@ cat ~/autofix-workspace/<project-name>/log.md
 
 ---
 
-## 12. Project structure
+## 13. Project structure
 
 ```
 AutoFix/
@@ -421,7 +750,7 @@ AutoFix/
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 ### `tmux: command not found`
 
@@ -485,7 +814,7 @@ Run `python autofix.py --dry-run` to see exactly which fields are invalid. Commo
 ### Watchdog not respawning a crashed pane
 
 1. Check the watchdog polling interval: `global.watchdog_interval_seconds` (default 60 s).
-2. Look for the crash-loop message in stdout: `[watchdog] ERROR: '<name>' crash-looping`.
-3. If crash-looping, restart AutoFix (`Ctrl+C` then `python autofix.py`) to clear state.
+2. Look for the crash-loop message in stdout: `[watchdog] ERROR: '<name>' crash-looping (>= 5 crashes)`.
+3. A crash-loop triggers a **10-minute timed pause** (not a permanent ban) — AutoFix will automatically resume after the pause window. To clear immediately, restart AutoFix (`Ctrl+C` then `python autofix.py`).
 4. Check that `libtmux >= 0.28` is installed (`pip show libtmux`) — older versions do not expose the `pane.dead` property used by the watchdog.
 
